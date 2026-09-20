@@ -23,7 +23,7 @@ wss.on('connection', async (clientWs) => {
   try {
     console.log('calling ai.live.connect...');
     session = await ai.live.connect({
-      model: 'gemini-live-2.5-flash-preview',
+      model: 'gemini-2.5-flash-native-audio-preview-12-2025',
       config: { responseModalities: ['TEXT'] },
       callbacks: {
         onopen: () => console.log('   [gemini] onopen'),
