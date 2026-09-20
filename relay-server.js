@@ -16,25 +16,25 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const liveWss = new WebSocketServer({ server, path: '/' });
 
 liveWss.on('connection', async (clientWs) => {
-  console.log('[live] client connected');
+  console.log('[live] browser connected');
+
   let session;
   try {
     session = await ai.live.connect({
       model: 'gemini-live-2.5-flash-preview',
       config: {
-        responseModalities: ['TEXT', 'AUDIO'],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
-        },
+        responseModalities: ['TEXT'],
       },
       callbacks: {
-        onmessage: (msg) => clientWs.send(JSON.stringify(msg)),
-        onerror: (e) => console.error('[live] error:', e),
-        onclose: () => clientWs.close(),
+        onmessage: (msg) => { try { clientWs.send(JSON.stringify(msg)); } catch (_) {} },
+        onerror:   (e)   => { console.error('[live] gemini err', e); try { clientWs.send(JSON.stringify({ type: 'error', message: String(e?.message || e) })); } catch (_) {} },
+        onclose:   ()    => { try { clientWs.close(); } catch (_) {} },
       },
     });
+    console.log('[live] gemini session opened');
   } catch (err) {
     console.error('[live] connect failed:', err);
+    try { clientWs.send(JSON.stringify({ type: 'error', message: 'Gemini connect failed: ' + (err?.message || err) })); } catch (_) {}
     clientWs.close();
     return;
   }
@@ -45,17 +45,13 @@ liveWss.on('connection', async (clientWs) => {
       if (msg.text) {
         await session.sendClientContent({
           turns: [{ role: 'user', parts: [{ text: msg.text }] }],
+          turnComplete: true,
         });
       }
-    } catch (e) {
-      console.error('[live] forward error:', e);
-    }
+    } catch (e) { console.error('[live] forward err', e); }
   });
 
-  clientWs.on('close', () => {
-    console.log('[live] client disconnected');
-    try { session.close(); } catch (_) {}
-  });
+  clientWs.on('close', () => { try { session.close(); } catch (_) {} });
 });
 
 /* =====================================================================
