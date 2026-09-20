@@ -3,60 +3,169 @@ import { WebSocketServer } from 'ws';
 import { GoogleGenAI } from '@google/genai';
 import http from 'http';
 
-// 1. Create a basic HTTP server for health checks (Render/Railway need this)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Gemini Live Relay is running.\n');
+  res.end('Gemini Live + Music Relay is running.\n');
 });
-
-// 2. Attach the WebSocket server to it
-const wss = new WebSocketServer({ server });
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-wss.on('connection', async (clientWs) => {
-    console.log('Client connected');
+/* =====================================================================
+ * PATH 1 —  /  →  Gemini Live API (text + voice chat)
+ * ===================================================================== */
+const liveWss = new WebSocketServer({ server, path: '/' });
 
+liveWss.on('connection', async (clientWs) => {
+  console.log('[live] client connected');
+  let session;
+  try {
+    session = await ai.live.connect({
+      model: 'gemini-2.0-flash-live-001',
+      config: {
+        responseModalities: ['TEXT', 'AUDIO'],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
+        },
+      },
+      callbacks: {
+        onmessage: (msg) => clientWs.send(JSON.stringify(msg)),
+        onerror: (e) => console.error('[live] error:', e),
+        onclose: () => clientWs.close(),
+      },
+    });
+  } catch (err) {
+    console.error('[live] connect failed:', err);
+    clientWs.close();
+    return;
+  }
+
+  clientWs.on('message', async (raw) => {
     try {
-        // Connect to Gemini Live API
-        const session = await ai.live.connect({
-            model: 'gemini-3.8-live',
-            config: {
-                responseModalities: ['TEXT', 'AUDIO'],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-            },
-            callbacks: {
-                onmessage: (message) => {
-                    // Forward Gemini messages to the client
-                    clientWs.send(JSON.stringify(message));
-                },
-                onerror: (error) => console.error('Gemini Live error:', error),
-                onclose: () => clientWs.close(),
-            },
+      const msg = JSON.parse(raw.toString());
+      if (msg.text) {
+        await session.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text: msg.text }] }],
         });
-
-        // Forward client messages to Gemini
-        clientWs.on('message', async (data) => {
-            try {
-                const message = JSON.parse(data.toString());
-                await session.sendClientContent(message);
-            } catch (e) { 
-                console.error('Error forwarding message:', e); 
-            }
-        });
-
-        clientWs.on('close', () => {
-            console.log('Client disconnected');
-            session.close();
-        });
-
-    } catch (error) {
-        console.error('Failed to connect to Gemini Live:', error);
-        clientWs.close();
+      }
+    } catch (e) {
+      console.error('[live] forward error:', e);
     }
+  });
+
+  clientWs.on('close', () => {
+    console.log('[live] client disconnected');
+    try { session.close(); } catch (_) {}
+  });
+});
+
+/* =====================================================================
+ * PATH 2 —  /music  →  Lyria RealTime (Live Music API)
+ * ===================================================================== */
+const musicWss = new WebSocketServer({ server, path: '/music' });
+
+musicWss.on('connection', async (clientWs) => {
+  console.log('[music] client connected');
+  let session;
+
+  const sendToClient = (obj) => {
+    try { clientWs.send(JSON.stringify(obj)); } catch (_) {}
+  };
+
+  try {
+    session = await ai.live.music.connect({
+      model: 'models/lyria-realtime-exp',
+      callbacks: {
+        onmessage: (message) => {
+          // Gemini sends { serverContent: { audioChunks: [...] } }
+          if (message?.serverContent?.audioChunks) {
+            for (const chunk of message.serverContent.audioChunks) {
+              if (chunk?.data) {
+                sendToClient({ type: 'audio', audio: chunk.data });
+              }
+            }
+          } else {
+            // Pass through any other server messages (status, errors, etc.)
+            sendToClient({ type: 'server', payload: message });
+          }
+        },
+        onerror: (e) => {
+          console.error('[music] error:', e);
+          sendToClient({ type: 'error', message: String(e?.message || e) });
+        },
+        onclose: () => {
+          sendToClient({ type: 'closed' });
+          clientWs.close();
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[music] connect failed:', err);
+    sendToClient({ type: 'error', message: 'Failed to connect: ' + err.message });
+    clientWs.close();
+    return;
+  }
+
+  sendToClient({ type: 'ready' });
+
+  clientWs.on('message', async (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+
+      // Set weighted text prompts
+      if (msg.action === 'prompts' && Array.isArray(msg.prompts)) {
+        await session.setWeightedPrompts({
+          weightedPrompts: msg.prompts.map((p) => ({
+            text: p.text,
+            weight: typeof p.weight === 'number' ? p.weight : 1.0,
+          })),
+        });
+        sendToClient({ type: 'ack', action: 'prompts' });
+      }
+
+      // Set generation config (bpm, density, brightness, etc.)
+      else if (msg.action === 'config') {
+        await session.setMusicGenerationConfig({
+          musicGenerationConfig: msg.config || {},
+        });
+        sendToClient({ type: 'ack', action: 'config' });
+      }
+
+      // Start playback
+      else if (msg.action === 'play') {
+        await session.play();
+        sendToClient({ type: 'ack', action: 'play' });
+      }
+
+      // Pause playback
+      else if (msg.action === 'pause') {
+        await session.pause();
+        sendToClient({ type: 'ack', action: 'pause' });
+      }
+
+      // Stop playback
+      else if (msg.action === 'stop') {
+        await session.stop();
+        sendToClient({ type: 'ack', action: 'stop' });
+      }
+
+      // Reset context
+      else if (msg.action === 'reset') {
+        await session.resetContext();
+        sendToClient({ type: 'ack', action: 'reset' });
+      }
+    } catch (e) {
+      console.error('[music] forward error:', e);
+      sendToClient({ type: 'error', message: e.message });
+    }
+  });
+
+  clientWs.on('close', () => {
+    console.log('[music] client disconnected');
+    try { session.close(); } catch (_) {}
+  });
 });
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`Relay server listening on port ${PORT}`);
+  console.log(`Relay listening on :${PORT}  (live: /  music: /music)`);
 });
