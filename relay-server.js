@@ -2,8 +2,8 @@ import { WebSocketServer } from 'ws';
 import { GoogleGenAI } from '@google/genai';
 import http from 'http';
 
-process.on('unhandledRejection', (reason) => console.error('❌ UNHANDLED REJECTION:', reason));
-process.on('uncaughtException',  (err)    => console.error('❌ UNCAUGHT EXCEPTION:', err));
+process.on('unhandledRejection', (r) => console.error('❌ UNHANDLED REJECTION:', r));
+process.on('uncaughtException',  (e) => console.error('❌ UNCAUGHT EXCEPTION:', e));
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -11,7 +11,6 @@ const server = http.createServer((req, res) => {
 });
 
 console.log('API key present:', !!process.env.GEMINI_API_KEY);
-
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const wss = new WebSocketServer({ server, path: '/' });
@@ -21,37 +20,41 @@ wss.on('connection', async (clientWs) => {
   let session;
 
   try {
-    console.log('calling ai.live.connect...');
     session = await ai.live.connect({
-      model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-      config: { responseModalities: ['TEXT'] },
+      model: 'gemini-3.1-flash-live-preview',
+      config: {
+        responseModalities: ['AUDIO'],      // ← AUDIO is required
+        outputAudioTranscription: {},       // ← asks for a text transcript too
+      },
       callbacks: {
         onopen: () => console.log('   [gemini] onopen'),
 
-        // ⬇️ THIS IS THE ONLY BLOCK THAT CHANGED ⬇️
         onmessage: (msg) => {
-          console.log('   [gemini] raw:', JSON.stringify(msg).slice(0, 200));
+          const sc = msg?.serverContent;
 
-          const parts = msg?.serverContent?.modelTurn?.parts || [];
-          const text = parts.map((p) => p.text || '').join('').trim();
-          const setupDone = msg?.setupComplete === true;
+          // 1. Text transcript of the model's audio reply
+          const text = sc?.outputTranscription?.text || '';
+          if (text) {
+            console.log('   [gemini] text:', text);
+            clientWs.send(JSON.stringify({ text }));
+          }
 
-          try {
-            if (text)      clientWs.send(JSON.stringify({ text }));
-            if (setupDone) clientWs.send(JSON.stringify({ setupComplete: true }));
-            for (const p of parts) {
-              if (p.inlineData?.data) {
-                clientWs.send(JSON.stringify({ audio: p.inlineData.data }));
-              }
+          // 2. Raw audio chunks (optional — forwarded if present)
+          const parts = sc?.modelTurn?.parts || [];
+          for (const p of parts) {
+            if (p.inlineData?.data) {
+              clientWs.send(JSON.stringify({ audio: p.inlineData.data }));
             }
-          } catch (e) {
-            console.error('   forward err', e);
+          }
+
+          // 3. Setup complete signal
+          if (msg?.setupComplete) {
+            clientWs.send(JSON.stringify({ setupComplete: true }));
           }
         },
-        // ⬆️ END OF CHANGED BLOCK ⬆️
 
-        onerror: (e) => console.error('   [gemini] onerror:', e),
-        onclose: (e) => console.log('   [gemini] onclose:', e),
+        onerror: (e) => console.error('   [gemini] onerror:', e?.message || e),
+        onclose: (e) => console.log('   [gemini] onclose:', e?.reason || e),
       },
     });
     console.log('✅ ai.live.connect returned');
@@ -63,15 +66,11 @@ wss.on('connection', async (clientWs) => {
   }
 
   clientWs.on('message', async (raw) => {
-    console.log('--- browser sent:', raw.toString().slice(0, 120));
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.text) {
-        console.log('sending to gemini...');
-        await session.sendClientContent({
-          turns: [{ role: 'user', parts: [{ text: msg.text }] }],
-          turnComplete: true,
-        });
+        // 3.1 models prefer sendRealtimeInput for incremental updates
+        await session.sendRealtimeInput({ text: msg.text });
         console.log('✅ sent to gemini');
       }
     } catch (e) {
