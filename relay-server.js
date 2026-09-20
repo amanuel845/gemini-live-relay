@@ -26,13 +26,32 @@ wss.on('connection', async (clientWs) => {
       model: 'gemini-live-2.5-flash-preview',
       config: { responseModalities: ['TEXT'] },
       callbacks: {
-        onopen:    () => console.log('   [gemini] onopen'),
+        onopen: () => console.log('   [gemini] onopen'),
+
+        // ⬇️ THIS IS THE ONLY BLOCK THAT CHANGED ⬇️
         onmessage: (msg) => {
-          console.log('   [gemini] onmessage:', JSON.stringify(msg).slice(0, 120));
-          try { clientWs.send(JSON.stringify(msg)); } catch (e) { console.error('   forward err', e); }
+          console.log('   [gemini] raw:', JSON.stringify(msg).slice(0, 200));
+
+          const parts = msg?.serverContent?.modelTurn?.parts || [];
+          const text = parts.map((p) => p.text || '').join('').trim();
+          const setupDone = msg?.setupComplete === true;
+
+          try {
+            if (text)      clientWs.send(JSON.stringify({ text }));
+            if (setupDone) clientWs.send(JSON.stringify({ setupComplete: true }));
+            for (const p of parts) {
+              if (p.inlineData?.data) {
+                clientWs.send(JSON.stringify({ audio: p.inlineData.data }));
+              }
+            }
+          } catch (e) {
+            console.error('   forward err', e);
+          }
         },
-        onerror:   (e) => console.error('   [gemini] onerror:', e),
-        onclose:   (e) => console.log('   [gemini] onclose:', e),
+        // ⬆️ END OF CHANGED BLOCK ⬆️
+
+        onerror: (e) => console.error('   [gemini] onerror:', e),
+        onclose: (e) => console.log('   [gemini] onclose:', e),
       },
     });
     console.log('✅ ai.live.connect returned');
