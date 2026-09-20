@@ -20,7 +20,7 @@ liveWss.on('connection', async (clientWs) => {
   let session;
   try {
     session = await ai.live.connect({
-      model: 'gemini-2.0-flash-live-001',
+      model: 'gemini-live-2.5-flash-preview',
       config: {
         responseModalities: ['TEXT', 'AUDIO'],
         speechConfig: {
