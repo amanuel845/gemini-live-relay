@@ -23,8 +23,8 @@ wss.on('connection', async (clientWs) => {
     session = await ai.live.connect({
       model: 'gemini-3.1-flash-live-preview',
       config: {
-        responseModalities: ['AUDIO'],      // ← AUDIO is required
-        outputAudioTranscription: {},       // ← asks for a text transcript too
+        responseModalities: ['AUDIO'],
+        outputAudioTranscription: {},
       },
       callbacks: {
         onopen: () => console.log('   [gemini] onopen'),
@@ -32,14 +32,14 @@ wss.on('connection', async (clientWs) => {
         onmessage: (msg) => {
           const sc = msg?.serverContent;
 
-          // 1. Text transcript of the model's audio reply
+          // 1. Text transcript chunk
           const text = sc?.outputTranscription?.text || '';
           if (text) {
-            console.log('   [gemini] text:', text);
+            console.log('   [gemini] text chunk:', JSON.stringify(text));
             clientWs.send(JSON.stringify({ text }));
           }
 
-          // 2. Raw audio chunks (optional — forwarded if present)
+          // 2. Audio chunks (optional playback on the client)
           const parts = sc?.modelTurn?.parts || [];
           for (const p of parts) {
             if (p.inlineData?.data) {
@@ -47,8 +47,15 @@ wss.on('connection', async (clientWs) => {
             }
           }
 
-          // 3. Setup complete signal
+          // 3. Signal turn completion so the client can finalize the bubble
+          if (sc?.turnComplete) {
+            console.log('   [gemini] turnComplete');
+            clientWs.send(JSON.stringify({ turnComplete: true }));
+          }
+
+          // 4. Setup complete
           if (msg?.setupComplete) {
+            console.log('   [gemini] setupComplete');
             clientWs.send(JSON.stringify({ setupComplete: true }));
           }
         },
@@ -69,7 +76,7 @@ wss.on('connection', async (clientWs) => {
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.text) {
-        // 3.1 models prefer sendRealtimeInput for incremental updates
+        console.log('--- browser sent:', msg.text);
         await session.sendRealtimeInput({ text: msg.text });
         console.log('✅ sent to gemini');
       }
